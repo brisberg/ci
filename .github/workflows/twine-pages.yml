@@ -1,0 +1,132 @@
+# brisberg/ci — .github/workflows/twine-pages.yml
+#
+# Builds a @brisberg/spindle Twine project and deploys the single compiled HTML
+# file to the calling repo's own GitHub Pages site.
+#
+# Requires @brisberg/spindle >= 0.3.0, which execs `tweego` from PATH. Versions
+# <= 0.2.2 call `go run github.com/tmedwards/tweego` instead and will ignore the
+# binary this workflow installs.
+#
+# The caller's entire pipeline is:
+#
+#   name: Deploy
+#   on:
+#     push: { branches: [main] }
+#     workflow_dispatch:
+#   permissions:          # required — see note below
+#     contents: read
+#     pages: write
+#     id-token: write
+#   jobs:
+#     deploy:
+#       uses: brisberg/ci/.github/workflows/twine-pages.yml@v1
+#
+# `permissions` cannot be omitted. A called workflow's token can never exceed
+# what the caller granted, so declaring them here does not give them to itself.
+
+name: Twine → Pages
+
+on:
+  workflow_call:
+    inputs:
+      tweego-version:
+        description: Tweego release to build with. Bump here once for every game.
+        type: string
+        default: "2.1.1"
+      tweego-sha256:
+        description: >
+          Checksum of tweego-<version>-linux-x64.zip. Must be updated with the
+          version. Release assets are mutable; a tag alone is not a pin.
+        type: string
+        default: "2ed11c3aa66c88ec5382b51061c7782152632b88916777428ab57a66feb7e5aa"
+      node-version:
+        description: >
+          Escape hatch. spindle runs on gulp 4, so if a future Node breaks it, a
+          game can pin back here without blocking the others.
+        type: string
+        default: "20"
+    outputs:
+      url:
+        description: Where the game was published.
+        value: ${{ jobs.deploy.outputs.url }}
+
+# Only first-party actions. No third-party action in this chain holds a token or
+# can be abandoned out from under it.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never race two deploys, never cancel one mid-flight. Scoped per calling repo,
+# so games do not queue behind each other.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: yarn
+
+      # Tweego ships as a prebuilt static binary. Its own bundled storyformats go
+      # unused: spindle sets TWEEGO_PATH to the formats inside its own npm
+      # package, which is where harlowe-3.1.0 and sugarcube-2.31.1 come from.
+      - name: Install tweego ${{ inputs.tweego-version }}
+        env:
+          VERSION: ${{ inputs.tweego-version }}
+          SHA256: ${{ inputs.tweego-sha256 }}
+        run: |
+          set -euo pipefail
+          dest="${RUNNER_TEMP}/tweego"
+          url="https://github.com/tmedwards/tweego/releases/download/v${VERSION}/tweego-${VERSION}-linux-x64.zip"
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/tweego.zip" "$url"
+          echo "${SHA256}  ${RUNNER_TEMP}/tweego.zip" | sha256sum -c -
+          mkdir -p "$dest"
+          unzip -q "${RUNNER_TEMP}/tweego.zip" -d "$dest"
+          chmod +x "$dest/tweego"
+          echo "$dest" >> "$GITHUB_PATH"
+
+      - run: yarn install --frozen-lockfile
+
+      - run: yarn build
+
+      # spindle names the story from `id:` in spindle.yml and writes
+      # head-content.html into the same directory, so a bare *.html glob would
+      # match two files. Identify by exclusion and assert exactly one, rather
+      # than parsing YAML in shell.
+      - name: Stage the deploy package
+        run: |
+          set -euo pipefail
+          mapfile -t built < <(
+            find output -maxdepth 1 -type f -name '*.html' ! -name 'head-content.html'
+          )
+          if [ "${#built[@]}" -ne 1 ]; then
+            echo "::error::expected one compiled story in output/, found ${#built[@]}"
+            ls -l output || true
+            exit 1
+          fi
+          mkdir dist
+          cp "${built[0]}" dist/index.html
+          echo "staged ${built[0]} ($(wc -c < dist/index.html) bytes)"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
