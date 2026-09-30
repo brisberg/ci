@@ -3,9 +3,10 @@
 # Builds a @brisberg/spindle Twine project and deploys the single compiled HTML
 # file to the calling repo's own GitHub Pages site.
 #
-# Requires @brisberg/spindle >= 0.3.0, which execs `tweego` from PATH. Versions
-# <= 0.2.2 call `go run github.com/tmedwards/tweego` instead and will ignore the
-# binary this workflow installs.
+# Requires @brisberg/spindle >= 0.5.1 (Node >= 22.17, config in spindle.json or
+# package.json "spindle", execs `tweego` from PATH, accepts --out), a committed
+# package-lock.json, and a `build` script whose last command is spindle. Games
+# still on 0.3/0.4 must stay on @v1.
 #
 # The caller's entire pipeline is:
 #
@@ -19,7 +20,7 @@
 #     id-token: write
 #   jobs:
 #     deploy:
-#       uses: brisberg/ci/.github/workflows/twine-pages.yml@v1
+#       uses: brisberg/ci/.github/workflows/twine-pages.yml@v2
 #
 # `permissions` cannot be omitted. A called workflow's token can never exceed
 # what the caller granted, so declaring them here does not give them to itself.
@@ -41,10 +42,10 @@ on:
         default: "2ed11c3aa66c88ec5382b51061c7782152632b88916777428ab57a66feb7e5aa"
       node-version:
         description: >
-          Escape hatch. spindle runs on gulp 4, so if a future Node breaks it, a
-          game can pin back here without blocking the others.
+          Escape hatch. spindle requires Node >= 22.17; if a future Node breaks
+          a game, it can pin back here without blocking the others.
         type: string
-        default: "20"
+        default: "22"
     outputs:
       url:
         description: Where the game was published.
@@ -72,11 +73,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
-          cache: yarn
+          cache: npm
 
-      # Tweego ships as a prebuilt static binary. Its own bundled storyformats go
-      # unused: spindle sets TWEEGO_PATH to the formats inside its own npm
-      # package, which is where harlowe-3.1.0 and sugarcube-2.31.1 come from.
+      # Tweego ships as a prebuilt static binary. The zip is unpacked whole, so
+      # its bundled storyformats/ sit next to the binary, where tweego finds
+      # them. spindle >= 0.5 bundles no formats; games should commit their own
+      # storyformats/ and treat these as a fallback, not a pin.
       - name: Install tweego ${{ inputs.tweego-version }}
         env:
           VERSION: ${{ inputs.tweego-version }}
@@ -92,32 +94,29 @@ jobs:
           chmod +x "$dest/tweego"
           echo "$dest" >> "$GITHUB_PATH"
 
-      - run: yarn install --frozen-lockfile
+      - run: npm ci
 
-      - run: yarn build
+      # npm appends args after `--` to the build script, so --out overrides
+      # `out` from the game's config whether or not the script passes -c. The
+      # game's own output path is never read, and nothing is written into the
+      # checkout. Needs spindle >= 0.5.1; older versions reject the flag.
+      - run: npm run build -- --out "${RUNNER_TEMP}/site/index.html"
 
-      # spindle names the story from `id:` in spindle.yml and writes
-      # head-content.html into the same directory, so a bare *.html glob would
-      # match two files. Identify by exclusion and assert exactly one, rather
-      # than parsing YAML in shell.
-      - name: Stage the deploy package
+      # Guards against a build script that exits 0 without spindle writing
+      # the file, e.g. when spindle is not its last command.
+      - name: Check the deploy package
         run: |
           set -euo pipefail
-          mapfile -t built < <(
-            find output -maxdepth 1 -type f -name '*.html' ! -name 'head-content.html'
-          )
-          if [ "${#built[@]}" -ne 1 ]; then
-            echo "::error::expected one compiled story in output/, found ${#built[@]}"
-            ls -l output || true
+          site="${RUNNER_TEMP}/site/index.html"
+          if [ ! -s "$site" ]; then
+            echo "::error::no compiled story at $site. Does the build script end with spindle?"
             exit 1
           fi
-          mkdir dist
-          cp "${built[0]}" dist/index.html
-          echo "staged ${built[0]} ($(wc -c < dist/index.html) bytes)"
+          echo "built $site ($(wc -c < "$site") bytes)"
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: ${{ runner.temp }}/site
 
   deploy:
     needs: build
