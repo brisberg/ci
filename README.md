@@ -87,6 +87,38 @@ spindle >= 0.5.1 and npm.
 A caller referencing a tag that does not exist fails at workflow _setup_ — the run
 shows zero jobs and no logs, because nothing was ever scheduled.
 
+### Tags are repo-wide
+
+A tag points at a commit, and `uses: brisberg/ci/.github/workflows/<name>.yml@v2`
+resolves the **whole repo** at that commit. So every callable workflow shares one set
+of version tags:
+
+- A workflow that did not change between `v1` and `v2` is byte-identical at both.
+  Nothing breaks; the version number just says nothing about that workflow.
+- A breaking change to any one workflow forces a new major for all of them.
+- Fixing a workflow for old callers means patching a release branch for that major.
+  Once `v3` exists, a fix on `main` reaches `v3` only, so `v2` needs cherry-picks and
+  a re-pointed `v2` tag.
+- Release notes list changes to workflows the reader does not use.
+
+This is fine for a handful of workflows that change together. It degrades as workflows
+accumulate and move at different cadences.
+
+### If this repo outgrows a single version line
+
+If the repo gets large, or its workflows become independent of each other, stop
+sharing one version line. Two options, in order of effort:
+
+1. **Per-workflow tag prefixes** in the same repo, e.g. `twine-pages/v2` and
+   `wiki-publish/v1`, referenced as `…/twine-pages.yml@twine-pages/v2`. Each workflow
+   gets its own moving major tag and its own breaking-change history. Do this before
+   there are many callers: moving existing callers off bare `v2` means editing every
+   one of them, or keeping the old tags alive indefinitely.
+2. **Split into separate repos** when workflows are effectively separate products,
+   with different audiences, release cadences or owners. This costs more overhead but
+   is the only fully clean isolation. It also keeps shared scripts or composite
+   actions from coupling every workflow's release to each other.
+
 ## Templates (legacy, copy-paste)
 
 Superseded by the callable form above, kept until each is migrated.
