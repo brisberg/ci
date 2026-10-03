@@ -1,0 +1,131 @@
+# brisberg/ci — .github/workflows/twine-test.yml
+#
+# Builds a @brisberg/spindle Twine project and runs its tests. Read-only: deploys
+# nothing, needs only `contents: read`, so it is safe on every branch.
+#
+# Pair it with twine-pages.yml in ONE caller workflow, so the deploy waits for the
+# tests. Two separate workflows (test on push, deploy on main) run in parallel and
+# would ship a failing build:
+#
+#   name: CI
+#   on:
+#     push:
+#     workflow_dispatch:
+#   jobs:
+#     test:
+#       permissions: { contents: read }
+#       uses: brisberg/ci/.github/workflows/twine-test.yml@v2
+#     deploy:
+#       needs: test
+#       if: github.ref == 'refs/heads/main'
+#       permissions: { contents: read, pages: write, id-token: write }
+#       uses: brisberg/ci/.github/workflows/twine-pages.yml@v2
+#
+# Tests are optional: `npm test --if-present` skips a game with no `test` script.
+# npm's placeholder script ("Error: no test specified" && exit 1) is NOT absent;
+# delete it, or this workflow fails.
+#
+# If the game depends on @playwright/test, Chromium and its system libraries are
+# installed before the tests run. Browsers are cached per Playwright version.
+
+name: Twine → Test
+
+on:
+  workflow_call:
+    inputs:
+      tweego-version:
+        description: Tweego release to build with. Keep in step with twine-pages.yml.
+        type: string
+        default: "2.1.1"
+      tweego-sha256:
+        description: >
+          Checksum of tweego-<version>-linux-x64.zip. Must be updated with the
+          version. Release assets are mutable; a tag alone is not a pin.
+        type: string
+        default: "2ed11c3aa66c88ec5382b51061c7782152632b88916777428ab57a66feb7e5aa"
+      node-version:
+        description: Escape hatch, as in twine-pages.yml.
+        type: string
+        default: "22"
+      artifacts-path:
+        description: >
+          Path (relative to the repo) to upload when the tests fail, e.g. a
+          Playwright results/traces directory. Empty uploads nothing.
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      # Duplicated from twine-pages.yml on purpose. A composite action would
+      # have to be referenced at a pinned ref (it cannot follow the caller's
+      # @v2), which couples the two workflows' releases. Keep both in step when
+      # bumping tweego.
+      - name: Install tweego ${{ inputs.tweego-version }}
+        env:
+          VERSION: ${{ inputs.tweego-version }}
+          SHA256: ${{ inputs.tweego-sha256 }}
+        run: |
+          set -euo pipefail
+          dest="${RUNNER_TEMP}/tweego"
+          url="https://github.com/tmedwards/tweego/releases/download/v${VERSION}/tweego-${VERSION}-linux-x64.zip"
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/tweego.zip" "$url"
+          echo "${SHA256}  ${RUNNER_TEMP}/tweego.zip" | sha256sum -c -
+          mkdir -p "$dest"
+          unzip -q "${RUNNER_TEMP}/tweego.zip" -d "$dest"
+          chmod +x "$dest/tweego"
+          echo "$dest" >> "$GITHUB_PATH"
+
+      - run: npm ci
+
+      # Fails fast on a story that doesn't compile, even for games without tests.
+      - run: npm run build
+
+      - name: Detect Playwright
+        id: playwright
+        run: |
+          set -euo pipefail
+          pkg=node_modules/@playwright/test/package.json
+          if [ -f "$pkg" ]; then
+            echo "version=$(node -p "require('./$pkg').version")" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cache Playwright browsers
+        if: steps.playwright.outputs.version
+        id: browser-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+
+      # System libraries live outside the cache, so they install on every run.
+      - name: Install Chromium
+        if: steps.playwright.outputs.version
+        run: |
+          if [ "${{ steps.browser-cache.outputs.cache-hit }}" = "true" ]; then
+            npx playwright install-deps chromium
+          else
+            npx playwright install --with-deps chromium
+          fi
+
+      - run: npm test --if-present
+
+      - name: Upload test artifacts
+        if: failure() && inputs.artifacts-path != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-artifacts
+          path: ${{ inputs.artifacts-path }}
+          if-no-files-found: ignore
+          retention-days: 7

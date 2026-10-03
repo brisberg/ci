@@ -65,6 +65,57 @@ Output: `url` — where the game was published.
   from a branch" the deploy silently does nothing. Setting it also creates the
   `github-pages` environment that the deploy job references.
 
+### `twine-test.yml` — build a Twine game and run its tests
+
+Read-only companion to `twine-pages.yml`. It needs only `contents: read`, so it can
+run on every branch. It runs `npm ci`, `npm run build`, then `npm test --if-present`.
+If the game depends on `@playwright/test`, Chromium and its system libraries are
+installed first, with browsers cached per Playwright version.
+
+Call both workflows from **one** caller workflow, so the deploy waits for the tests:
+
+```yaml
+name: CI
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  test:
+    permissions: { contents: read }
+    uses: brisberg/ci/.github/workflows/twine-test.yml@v2
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    permissions: { contents: read, pages: write, id-token: write }
+    uses: brisberg/ci/.github/workflows/twine-pages.yml@v2
+```
+
+Don't split this into a `test.yml` (every push) and a `deploy.yml` (main). Separate
+workflows run in parallel, so `main` would deploy whether or not its tests pass.
+Job-level `permissions` keep `pages: write` away from the test job.
+
+| Input            | Default           | Why you would change it                                                                |
+| ---------------- | ----------------- | -------------------------------------------------------------------------------------- |
+| `tweego-version` | `2.1.1`           | Keep in step with `twine-pages.yml`.                                                   |
+| `tweego-sha256`  | checksum of 2.1.1 | Changes together with the version.                                                     |
+| `node-version`   | `22`              | Same escape hatch as `twine-pages.yml`.                                                |
+| `artifacts-path` | _(empty)_         | Directory to upload when tests fail, e.g. Playwright traces (`test-output/results`). |
+
+#### What the caller must have
+
+- Everything `twine-pages.yml` requires for the build (spindle >= 0.5.1, npm, a
+  committed lockfile, `storyformats/`).
+- **No placeholder `test` script.** npm's default
+  `"echo \"Error: no test specified\" && exit 1"` exists, so `--if-present` runs
+  it and it fails. Delete it from games without tests.
+- A `test` script that is self-contained: it may rebuild the game, and it must
+  find `tweego` on `PATH`, which this workflow provides.
+
+The tweego install step is duplicated from `twine-pages.yml` rather than shared
+through a composite action. A reusable workflow can only reference an action at a
+pinned ref, not "whatever ref I was called at", so sharing it would couple the two
+workflows' releases. Bump both together.
+
 ## Versioning
 
 Callers pin a tag, never a branch:
